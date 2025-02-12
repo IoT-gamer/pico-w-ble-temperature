@@ -11,7 +11,7 @@ This project implements a Bluetooth Low Energy (BLE) temperature sensor using th
 ## Notes ⚠️
 - [Arduino Wrapper for BTstack library does not support notifications.](https://github.com/bluekitchen/btstack/issues/551#issuecomment-1827805004) 
 - The code has been modified as a workaround to support notifications.
-- Some notifications might be dropped if the client is busy
+- Notifications are sent when temperature has changed and client is not busy.
 
 ## Hardware Requirements
 
