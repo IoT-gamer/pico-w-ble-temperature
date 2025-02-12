@@ -5,6 +5,7 @@
 // Direct BTstack includes
 #include "ble/att_server.h"
 #include "bluetooth.h"
+#include "btstack_event.h"
 
 // Temperature service UUID (custom)
 const char* TEMP_SERVICE_UUID = "181A";  // Environmental Sensing service
@@ -16,6 +17,8 @@ static uint32_t last_notify_time = 0;
 const uint32_t NOTIFY_INTERVAL = 1000;  // Notify every 1 second
 static bool client_subscribed = false;
 static hci_con_handle_t con_handle = HCI_CON_HANDLE_INVALID;
+static bool notification_pending = false;
+static float pending_temperature = 0.0f;
 
 // Read temperature from Pico-W internal temperature sensor
 float readTemperature() {
@@ -46,12 +49,31 @@ bool notify_client_temperature(float temperature) {
         // Send notification using direct BTstack call
         if (att_server_notify(con_handle, temp_char_handle, value, sizeof(value)) == 0) {
             Serial.printf("Notification sent: %.2f°C\n", temperature);
+            notification_pending = false;
             return true;
         }
     } else {
-        Serial.println("Client busy. Could not send notification");
+        Serial.println("Client busy. Requesting notification permission...");
+        pending_temperature = temperature;
+        notification_pending = true;
+        att_server_request_can_send_now_event(con_handle);
     }
     return false;
+}
+
+// Global callback registration and temperature queue
+static btstack_packet_callback_registration_t hci_event_callback_registration;
+
+// BTstack packet handler
+static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
+    if (packet_type != HCI_EVENT_PACKET) return;
+    
+    uint8_t event = packet[0];
+    if (event == ATT_EVENT_CAN_SEND_NOW) {
+        if (notification_pending) {
+            notify_client_temperature(pending_temperature);
+        }
+    }
 }
 
 // Callback for BLE device connections
@@ -71,6 +93,7 @@ void deviceDisconnectedCallback(BLEDevice *device) {
     Serial.println("Device disconnected!");
     con_handle = HCI_CON_HANDLE_INVALID;
     client_subscribed = false;
+    notification_pending = false;
 }
 
 // Callback for characteristic reads
@@ -95,6 +118,7 @@ int gattWriteCallback(uint16_t value_handle, uint8_t *buffer, uint16_t buffer_si
             Serial.println("Notifications enabled by client");
         } else if (value == 0x0000) {
             client_subscribed = false;
+            notification_pending = false;
             Serial.println("Notifications disabled by client");
         }
     }
@@ -112,6 +136,9 @@ void setup() {
     BTstack.setBLEDeviceDisconnectedCallback(deviceDisconnectedCallback);
     BTstack.setGATTCharacteristicRead(gattReadCallback);
     BTstack.setGATTCharacteristicWrite(gattWriteCallback);
+    // Register for HCI events
+    hci_event_callback_registration.callback = &packet_handler;
+    hci_add_event_handler(&hci_event_callback_registration);
     
     // Add Environmental Sensing service and temperature characteristic
     BTstack.addGATTService(new UUID(TEMP_SERVICE_UUID));
@@ -136,8 +163,8 @@ void loop() {
     if (current_time - last_notify_time >= NOTIFY_INTERVAL) {
         float temp = readTemperature();
         
-        // Only notify if temperature has changed
-        if (abs(temp - last_temp) >= 0.1f) {  // 0.1°C threshold
+        // Only notify if temperature has changed and no notification is pending
+        if (!notification_pending && abs(temp - last_temp) >= 0.1f) {  // 0.1°C threshold
             if (notify_client_temperature(temp)) {
                 last_temp = temp;
             }
